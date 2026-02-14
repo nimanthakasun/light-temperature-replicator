@@ -4,6 +4,10 @@
 #include <SoftwareSerial.h>
 #endif
 
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
 DFRobot_ColorTemperature CT(/*pWire = */&Wire);
 
 // PWM Configuration
@@ -36,8 +40,25 @@ const char* PREF_KEY = "avgValue";
 /* -------------------- VARIABLES -------------------- */
 unsigned int storedSensorValue = 0;
 
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+#define OLED_RESET -1
+#define OLED_ADDR 0x3C
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+
 bool buttonPressed = false;
 unsigned long buttonPressStart = 0;
+
+void showMessage(String line1, String line2 = "")
+{
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(line1);
+  display.println(line2);
+  display.display();
+}
  
 void setup(){
   // configure LED PWM
@@ -46,6 +67,12 @@ void setup(){
 
   // Initialize Serial
   Serial.begin(115200);
+
+  // Initialize Display
+  Wire.begin();
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
 
   //Initialize Color sensor
   while(CT.begin() != 0){
@@ -58,6 +85,8 @@ void setup(){
   pinMode(saveSwitch, INPUT_PULLUP); 
 
   storedSensorValue = loadFromEEPROM();
+  showMessage("Booting...", "Stored: " + String(storedSensorValue));
+  delay(1500);
   applyPWM(storedSensorValue);
 }
  
@@ -86,10 +115,10 @@ void handleButton()
 
     if (pressDuration >= LONG_PRESS_TIME)
     {
-      //showMessage("Long Press Detected", "Capturing...");
+      showMessage("Long Press Detected", "Capturing...");
       unsigned int avg = captureAverageSensor();
       storedSensorValue = avg;
-      //showMessage("Saving to EEPROM", String(avg));
+      showMessage("Saving to EEPROM", String(avg));
       saveToEEPROM(avg);
       delay(1000);
       applyPWM(storedSensorValue);
@@ -120,11 +149,11 @@ void applyPWM(uint16_t sensorValue){
     uint32_t pwmI = 255 - pwm;
     ledcWrite(LEDW, pwm);
     ledcWrite(LEDY, pwmI);
-    //showMessage("Output PWM", "Value: " + String(pwm));
+    showMessage("Output PWM", "Value: " + String(pwm));
 }
 
 unsigned int captureAverageSensor(){
-    //showMessage("Reading Sensor...", "Please wait");
+    showMessage("Reading Sensor...", "Please wait");
 
     unsigned long sum = 0;
 
@@ -132,7 +161,7 @@ unsigned int captureAverageSensor(){
     {
         unsigned int val = retrieveSensorData();
         sum += val;
-        //showMessage("Reading Sensor...","Sample " + String(i + 1) + "/" + String(SENSOR_SAMPLE_COUNT));
+        showMessage("Reading Sensor...","Sample " + String(i + 1) + "/" + String(SENSOR_SAMPLE_COUNT));
         delay(150);
     }
 
@@ -153,3 +182,4 @@ unsigned int loadFromEEPROM(){
 
     return val;
 }
+

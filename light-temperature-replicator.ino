@@ -1,5 +1,7 @@
 #include <Preferences.h>
 #include "DFRobot_ColorTemperature.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #if defined(ARDUINO_AVR_UNO)||defined(ESP8266)
 #include <SoftwareSerial.h>
 #endif
@@ -19,10 +21,18 @@ const int resolution = 8;
 // Input configuratio
 const int saveSwitch = 14;
 
-//Senssor Values
+//Sensor Values
 int mappedTemp = 0;
 int mappedTempComp = 0;
 
+// Internal tempSensor
+const int oneWireBus = 4;     
+
+// Brightness adjustments
+int floorVal = 0;
+int ceilingVal = 0;
+
+// Time sharing variables
 unsigned long previousMillis = 0;
 unsigned long switchDuration = 0;
 
@@ -30,7 +40,11 @@ unsigned long switchDuration = 0;
 #define LONG_PRESS_TIME 5000   // 5 seconds
 
 /* -------------------- SENSOR CONFIG -------------------- */
+// Color Temp
 #define SENSOR_SAMPLE_COUNT 20
+// Internal Temp
+OneWire oneWire(oneWireBus);
+DallasTemperature DS18B20(&oneWire);
 
 /* -------------------- STORAGE -------------------- */
 Preferences preferences;
@@ -74,6 +88,9 @@ void setup(){
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
+  // Initialize internal temp sensor
+  DS18B20.begin();
+
   //Initialize Color sensor
   while(CT.begin() != 0){
     Serial.println(" Sensor initialize failed!!");
@@ -90,50 +107,11 @@ void setup(){
   applyPWM(storedSensorValue);
 }
  
-void loop(){   
-  handleButton();
+void loop(){
+  if(!internalTempShutoff()){
+    handleButton();
+  }
   delay(50);
-}
-
-void handleButton()
-{
-  bool currentState = digitalRead(saveSwitch) == LOW;
-
-  if (currentState && !buttonPressed)
-  {
-    // Button just pressed
-    buttonPressed = true;
-    buttonPressStart = millis();
-  }
-
-  if (!currentState && buttonPressed)
-  {
-    // Button released
-    buttonPressed = false;
-
-    unsigned long pressDuration = millis() - buttonPressStart;
-
-    if (pressDuration >= LONG_PRESS_TIME)
-    {
-      showMessage("Long Press Detected", "Capturing...");
-      unsigned int avg = captureAverageSensor();
-      storedSensorValue = avg;
-      showMessage("Saving to EEPROM", String(avg));
-      saveToEEPROM(avg);
-      delay(1000);
-      applyPWM(storedSensorValue);
-    }
-  }
-
-  // Optional progress feedback
-  // if (buttonPressed)
-  // {
-  //   unsigned long heldTime = millis() - buttonPressStart;
-  //   if (heldTime < LONG_PRESS_TIME)
-  //   {
-  //         //showMessage("Hold Button...",String((LONG_PRESS_TIME - heldTime) / 1000.0, 1) + "s left");
-  //   }
-  // }
 }
 
 uint16_t retrieveSensorData(){
@@ -149,6 +127,19 @@ void applyPWM(uint16_t sensorValue){
     uint32_t pwmI = 255 - pwm;
     ledcWrite(LEDW, pwm);
     ledcWrite(LEDY, pwmI);
+
+    if(pwm > pwmI){
+      floorVal = pwmI;
+      ceilingVal = pwm;
+    }
+    else if( pwm == pwmI){
+      floorVal = pwm;
+      ceilingVal = pwm;
+    }
+    else{
+      floorVal = pwm;
+      ceilngVal = pwmI;
+    }
     showMessage("Output PWM", "Value: " + String(pwm));
 }
 
@@ -167,6 +158,23 @@ unsigned int captureAverageSensor(){
 
     unsigned int avg = sum / SENSOR_SAMPLE_COUNT;
     return avg;
+}
+
+void relTimeBrightnessAdjustment(){
+
+}
+
+void manualBrightnessAdjustment(){
+  
+}
+
+bool internalTempShutoff(){
+  DS18B20.requestTemperatures(); 
+  float temperatureC = DS18B20.getTempCByIndex(0);
+  if(temperatureC > 50){
+    return true;
+  }
+  return false;
 }
 
 void saveToEEPROM(unsigned int value){

@@ -89,6 +89,7 @@ const char* PREF_KEY_LUX = "avgValue";
 
 /* -------------------- VARIABLES -------------------- */
 unsigned int storedSensorValue = 0;
+unsigned int storedLuxValue = 0;
 
 /* -------------------- OLED DISPLAY -------------------- */
 #define SCREEN_WIDTH 128
@@ -153,11 +154,6 @@ void setup(){
   pinMode(DT, INPUT);
   pinMode(SW, INPUT);
 
-  storedSensorValue = loadFromEEPROM();
-  showMessage("Booting...", "Stored: " + String(storedSensorValue));
-  delay(1500);
-  applyPWM(calculatePWM(storedSensorValue));
-
   // Initiate Lux sensor
   if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
     Serial.println(F("BH1750 Advanced begin"));
@@ -165,7 +161,7 @@ void setup(){
     Serial.println(F("Error initialising BH1750"));
   }
 
-  // Initialize Display
+  bootSequence();
 
 }
  
@@ -202,23 +198,24 @@ void handleButton()
     {
       showMessage("Long Press Detected", "Capturing...");
       Serial.print("Long Press Detected. Capturing...");
+      float lux = 0.0;
       unsigned int avg = captureAverageSensor();
       storedSensorValue = avg;
       Serial.print("Color Temperature: ");
       Serial.println(avg);
 
       if (lightMeter.measurementReady()) {
-        float lux = lightMeter.readLightLevel();
+        lux = lightMeter.readLightLevel();
         Serial.print("External Lux: ");
         Serial.print(lux);
         Serial.println(" lx");
       }
 
       showMessage("Saving to EEPROM", String(avg));
-      Serial.print("Saving to EEPROM");
+      Serial.print("Saving to EEPROM: ");
       Serial.println(avg);
       saveToEEPROM(PREF_KEY_TEMP, avg);
-      saveToEEPROM(PREF_KEY_LUX, avg);
+      saveToEEPROM(PREF_KEY_LUX, lux);
       delay(1000);
       applyPWM(calculatePWM(storedSensorValue));
     }
@@ -294,11 +291,17 @@ void saveToEEPROM(const char *key, unsigned int value){
     preferences.end();
 }
 
-unsigned int loadFromEEPROM(){
+unsigned int loadTempFromEEPROM(){
+    preferences.begin(PREF_NAMESPACE, true);
+    unsigned int val = preferences.getUInt(PREF_KEY_TEMP, 0);
+    preferences.end();
+    return val;
+}
+
+unsigned int loadLuxFromEEPROM(){
     preferences.begin(PREF_NAMESPACE, true);
     unsigned int val = preferences.getUInt(PREF_KEY_LUX, 0);
     preferences.end();
-
     return val;
 }
 
@@ -357,8 +360,7 @@ void applyPWM(uint32_t pwm){
 }
 
 // Initialize display
-void initDisplay()
-{
+void initDisplay(){
     // Initialize Display
   Wire.begin();
   display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -366,11 +368,24 @@ void initDisplay()
   display.setTextColor(SSD1306_WHITE);
 }
 
-void showMessage(String line1, String line2 = "")
-{
+void showMessage(String line1, String line2 = ""){
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println(line1);
   display.println(line2);
   display.display();
+}
+
+void bootSequence(){
+  storedSensorValue = loadTempFromEEPROM();
+  storedLuxValue = loadLuxFromEEPROM();
+  showMessage("Booting...", "Stored color temperature: " + String(storedSensorValue));
+  Serial.println("Booting...");
+
+  Serial.print("Stored color temperature: ");
+  Serial.println(String(storedSensorValue));
+  Serial.print("Stored lux value: ");
+  Serial.println(String(storedLuxValue));
+  delay(1500);
+  applyPWM(calculatePWM(storedSensorValue));
 }

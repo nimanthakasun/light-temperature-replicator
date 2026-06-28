@@ -172,6 +172,7 @@ void setup(){
 void loop(){
   if(!internalTempShutoff()){
     handleButton();
+    showMessage("Sample Text", "Sample text 2");
     // checkAdjusterChange();
   }
   delay(50);
@@ -200,6 +201,7 @@ void handleButton()
     if (pressDuration >= LONG_PRESS_TIME)
     {
       showMessage("Long Press Detected", "Capturing...");
+      Serial.print("Long Press Detected. Capturing...");
       unsigned int avg = captureAverageSensor();
       storedSensorValue = avg;
       Serial.print("Color Temperature: ");
@@ -213,6 +215,8 @@ void handleButton()
       }
 
       showMessage("Saving to EEPROM", String(avg));
+      Serial.print("Saving to EEPROM");
+      Serial.println(avg);
       saveToEEPROM(PREF_KEY_TEMP, avg);
       saveToEEPROM(PREF_KEY_LUX, avg);
       delay(1000);

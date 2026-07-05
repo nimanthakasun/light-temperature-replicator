@@ -57,7 +57,8 @@ int mappedTemp = 0;
 int mappedTempComp = 0;
 
 // Internal tempSensor
-const int oneWireBus = 4;     
+const int oneWireBus = 4;
+bool alreadyReduced = false;
 
 // Brightness adjustments
 int floorVal = 0;
@@ -78,14 +79,16 @@ unsigned long switchDuration = 0;
 // Internal Temp
 OneWire oneWire(oneWireBus);
 DallasTemperature DS18B20(&oneWire);
+#define SHUTOFF_THRESHOLD 75
+#define DIMMING_THRESHOLD 60
 // Lux Sensor - External
 BH1750 lightMeter(0x23);
 
 /* -------------------- STORAGE -------------------- */
 Preferences preferences;
 const char* PREF_NAMESPACE = "sensor";
-const char* PREF_KEY_TEMP = "avgValue";
-const char* PREF_KEY_LUX = "avgValue";
+const char* PREF_KEY_TEMP = "clTempVal";
+const char* PREF_KEY_LUX = "luxValue";
 
 /* -------------------- VARIABLES -------------------- */
 unsigned int storedSensorValue = 0;
@@ -103,7 +106,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // colortempsensor_handler.inoo
 void init_colortempSensor();
-unsigned int captureAverageSensor();
+unsigned int captureAverageColorTempSensorValue();
 uint16_t retrieveSensorData();
 
 // ledstrip_handler.ino
@@ -199,10 +202,12 @@ void handleButton()
       showMessage("Long Press Detected", "Capturing...");
       Serial.print("Long Press Detected. Capturing...");
       float lux = 0.0;
-      unsigned int avg = captureAverageSensor();
-      storedSensorValue = avg;
+
+      // Capturing Color temperatre
+      unsigned int avgColorTemp = captureAverageColorTempSensorValue();
+      storedSensorValue = avgColorTemp;
       Serial.print("Color Temperature: ");
-      Serial.println(avg);
+      Serial.println(avgColorTemp);
 
       if (lightMeter.measurementReady()) {
         lux = lightMeter.readLightLevel();
@@ -211,11 +216,14 @@ void handleButton()
         Serial.println(" lx");
       }
 
-      showMessage("Saving to EEPROM", String(avg));
-      Serial.print("Saving to EEPROM: ");
-      Serial.println(avg);
-      saveToEEPROM(PREF_KEY_TEMP, avg);
+      showMessage("Saving to EEPROM", String(avgColorTemp));
+      Serial.print("Saving to EEPROM color temperature: ");
+      Serial.println(avgColorTemp);
+      Serial.print("Saving to EEPROM lux: ");
+      Serial.println(lux);
+      saveToEEPROM(PREF_KEY_TEMP, avgColorTemp);
       saveToEEPROM(PREF_KEY_LUX, lux);
+      storedLuxValue = (unsigned int)lux;
       delay(1000);
       applyPWM(calculatePWM(storedSensorValue));
     }
@@ -277,10 +285,29 @@ bool internalTempShutoff(){
   float temperatureC = DS18B20.getTempCByIndex(0);
   Serial.print("Internal Tempearture: ");
   Serial.println(temperatureC);
-  if(temperatureC > 50){
+  if(temperatureC > SHUTOFF_THRESHOLD){
     return true;
   }
-  return false;
+  else if(temperatureC > DIMMING_THRESHOLD){
+    if(!alreadyReduced){
+      storedSensorValue = loadTempFromEEPROM();
+      storedLuxValue = loadLuxFromEEPROM();
+      showMessage("Higher Internal temperature detected", "Reducing brightness...");
+      Serial.println("Higher Internal temperature detected. Reducing brightness...");
+
+      Serial.print("Stored color temperature: ");
+      Serial.println(String(storedSensorValue));
+      Serial.print("Stored lux value: ");
+      Serial.println(String(storedLuxValue));
+      delay(1500);
+      applyPWM(calculatePWM(storedSensorValue/2));
+      alreadyReduced = true;
+    }
+    return true;
+  }
+  else{
+    return false;
+  }
 }
 
 
@@ -313,7 +340,7 @@ void init_colortempSensor(){
   }
 }
 
-unsigned int captureAverageSensor(){
+unsigned int captureAverageColorTempSensorValue(){
     showMessage("Reading Sensor...", "Please wait");
 
     unsigned long sum = 0;
@@ -361,7 +388,6 @@ void applyPWM(uint32_t pwm){
 
 // Initialize display
 void initDisplay(){
-    // Initialize Display
   Wire.begin();
   display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   display.setTextSize(1);

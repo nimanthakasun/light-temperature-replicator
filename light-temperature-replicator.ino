@@ -10,21 +10,8 @@
 #include <SoftwareSerial.h>
 #endif
 
-#include <display_handler.h>
-
-// Display Handler
-#ifndef DISPLAY_HANDLER_H
-#define DISPLAY_HANDLER_H
-
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-
-void initDisplay();
-void showMessage(String line1, String line2);
-
-#endif
 
 DFRobot_ColorTemperature CT(/*pWire = */&Wire);
 
@@ -94,13 +81,31 @@ const char* PREF_KEY_LUX = "luxValue";
 unsigned int storedSensorValue = 0;
 unsigned int storedLuxValue = 0;
 
-/* -------------------- OLED DISPLAY -------------------- */
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32
-#define OLED_RESET -1
-#define OLED_ADDR 0x3C
+/* -------------------- REAL-TIME BRIGHTNESS ADJUSTMENT -------------------- */
+// Baseline lux captured on long-press save, used as the reference point.
+float baselineLux = 0;
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// Hysteresis bands, expressed as a ratio of current lux to baselineLux.
+// Below LUX_DROP_RATIO  -> ambient light dropped a lot -> dim.
+// Above LUX_RISE_RATIO  -> ambient light rose a lot     -> brighten.
+// In between            -> no change (prevents flicker at the edges).
+const float LUX_DROP_RATIO  = 0.7f;   // 30% darker than baseline
+const float LUX_RISE_RATIO  = 1.3f;   // 30% brighter than baseline
+
+// Fixed-step brightness adjustments (not a full lux->PWM mapping).
+const float DIM_STEP    = 0.8f;   // -20%
+const float BRIGHT_STEP = 1.2f;   // +20%
+
+// -1 = dimmed one step, 0 = normal, 1 = brightened one step.
+int brightnessState = 0;
+
+// How often to poll/re-evaluate lux for the real-time adjustment.
+const unsigned long LUX_CHECK_INTERVAL = 2000; // ms
+
+// The "base" white/yellow PWM pair representing the captured color temperature,
+// before any real-time brightness scaling is applied.
+unsigned int baseWhitePWM = 0;
+unsigned int baseYellowPWM = 0;
 
 // Function Definitions
 
@@ -111,17 +116,19 @@ uint16_t retrieveSensorData();
 
 // ledstrip_handler.ino
 uint32_t calculatePWM(uint16_t sensorValue);
-void applyPWM(uint32_t pwm);
+void setBasePWM(uint16_t sensorValue);
+void applyScaledPWM(float scale);
 
 // memory_handler.ino
-void saveToEEPROM(unsigned int value);
-unsigned int loadFromEEPROM();
+void saveToEEPROM(const char *key, unsigned int value);
+unsigned int loadTempFromEEPROM();
+unsigned int loadLuxFromEEPROM();
 
 // tempdhutoff_handler.ino
 bool internalTempShutoff();
 
 // brightness_handler.ino
-void checkAdjusterChange();
+void relTimeBrightnessAdjustment();
 
 // switch_handler.ino
 void handleButton();
@@ -140,7 +147,7 @@ void setup(){
   Serial.begin(115200);
 
   // Initialize Display
-  initDisplay();
+  // initDisplay();
 
   // Initialize internal temp sensor
   DS18B20.begin();
@@ -171,8 +178,13 @@ void setup(){
 void loop(){
   if(!internalTempShutoff()){
     handleButton();
-    showMessage("Sample Text", "Sample text 2");
-    // checkAdjusterChange();
+    // Poll ambient lux periodically (not every loop tick) and react if it has
+    // moved far enough from the saved baseline.
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= LUX_CHECK_INTERVAL) {
+      previousMillis = currentMillis;
+      relTimeBrightnessAdjustment();
+    }
   }
   delay(50);
 }
@@ -199,7 +211,7 @@ void handleButton()
 
     if (pressDuration >= LONG_PRESS_TIME)
     {
-      showMessage("Long Press Detected", "Capturing...");
+      // showMessage("Long Press Detected", "Capturing...");
       Serial.print("Long Press Detected. Capturing...");
       float lux = 0.0;
 
@@ -216,67 +228,62 @@ void handleButton()
         Serial.println(" lx");
       }
 
-      showMessage("Saving to EEPROM", String(avgColorTemp));
+      // showMessage("Saving to EEPROM", String(avgColorTemp));
       Serial.print("Saving to EEPROM color temperature: ");
       Serial.println(avgColorTemp);
       Serial.print("Saving to EEPROM lux: ");
       Serial.println(lux);
       saveToEEPROM(PREF_KEY_TEMP, avgColorTemp);
-      saveToEEPROM(PREF_KEY_LUX, lux);
+      saveToEEPROM(PREF_KEY_LUX, (unsigned int)lux);
       storedLuxValue = (unsigned int)lux;
+      baselineLux = lux;
+      brightnessState = 0; // fresh baseline -> reset any prior dim/bright state
+
       delay(1000);
-      applyPWM(calculatePWM(storedSensorValue));
+      setBasePWM(storedSensorValue);
+      applyScaledPWM(1.0f);
     }
   }
-
-  // Optional progress feedback
-  // if (buttonPressed)
-  // {
-  //   unsigned long heldTime = millis() - buttonPressStart;
-  //   if (heldTime < LONG_PRESS_TIME)
-  //   {
-  //         //showMessage("Hold Button...",String((LONG_PRESS_TIME - heldTime) / 1000.0, 1) + "s left");
-  //   }
-  // }
 }
 
 // Brightness Handler
 void relTimeBrightnessAdjustment(){
+  // Nothing to compare against yet (e.g. no long-press capture has happened).
+  if (baselineLux <= 0) return;
 
+  if (!lightMeter.measurementReady()) return;
+  float currentLux = lightMeter.readLightLevel();
+  if (currentLux < 0) return; // BH1750 read error
+
+  float ratio = currentLux / baselineLux;
+  int newState = brightnessState;
+
+  if (ratio < LUX_DROP_RATIO && brightnessState > -1) {
+    newState = brightnessState - 1;
+  } else if (ratio > LUX_RISE_RATIO && brightnessState < 1) {
+    newState = brightnessState + 1;
+  } else if (ratio >= LUX_DROP_RATIO && ratio <= LUX_RISE_RATIO) {
+    newState = 0; // back within the normal band -> return to baseline brightness
+  }
+
+  if (newState != brightnessState) {
+    brightnessState = newState;
+
+    float scale = 1.0f;
+    if (brightnessState == -1) scale = DIM_STEP;
+    else if (brightnessState == 1) scale = BRIGHT_STEP;
+
+    Serial.print("Ambient lux: "); Serial.print(currentLux);
+    Serial.print(" | baseline: "); Serial.print(baselineLux);
+    Serial.print(" | ratio: "); Serial.print(ratio);
+    Serial.print(" | new brightnessState: "); Serial.println(brightnessState);
+
+    applyScaledPWM(scale);
+  }
 }
 
 void manualBrightnessAdjustment(){
   
-}
-
-void checkAdjusterChange(){
-  // Prev---------
-  // CLK_state = digitalRead(CLOCK);
-  // if (CLK_state != prev_CLK_state && CLK_state == HIGH) {
-  //   if (digitalRead(DT) == HIGH) {
-  //     counter--;
-  //     direction = DIRECTION_CCW;
-  //     Serial.println("CCW");
-  //   } else {
-  //     counter++;
-  //     direction = DIRECTION_CW;
-  //     Serial.println("CW");
-  //   }
-  // }
-  // prev_CLK_state = CLK_state;
-
-  // New ---------
-  static int pos = 0;
-  encoder.tick();
-
-  int newPos = encoder.getPosition();
-  if (pos != newPos) {
-    Serial.print("pos:");
-    Serial.print(newPos);
-    Serial.print(" dir:");
-    Serial.println((int)(encoder.getDirection()));
-    pos = newPos;
-  }
 }
 
 // Temperature Shutdown
@@ -292,7 +299,7 @@ bool internalTempShutoff(){
     if(!alreadyReduced){
       storedSensorValue = loadTempFromEEPROM();
       storedLuxValue = loadLuxFromEEPROM();
-      showMessage("Higher Internal temperature detected", "Reducing brightness...");
+      // showMessage("Higher Internal temperature detected", "Reducing brightness...");
       Serial.println("Higher Internal temperature detected. Reducing brightness...");
 
       Serial.print("Stored color temperature: ");
@@ -300,7 +307,8 @@ bool internalTempShutoff(){
       Serial.print("Stored lux value: ");
       Serial.println(String(storedLuxValue));
       delay(1500);
-      applyPWM(calculatePWM(storedSensorValue/2));
+      setBasePWM(storedSensorValue);
+      applyScaledPWM(0.5f);
       alreadyReduced = true;
     }
     return true;
@@ -341,7 +349,7 @@ void init_colortempSensor(){
 }
 
 unsigned int captureAverageColorTempSensorValue(){
-    showMessage("Reading Sensor...", "Please wait");
+    // showMessage("Reading Sensor...", "Please wait");
 
     unsigned long sum = 0;
 
@@ -349,7 +357,7 @@ unsigned int captureAverageColorTempSensorValue(){
     {
         unsigned int val = retrieveSensorData();
         sum += val;
-        showMessage("Reading Sensor...","Sample " + String(i + 1) + "/" + String(SENSOR_SAMPLE_COUNT));
+        // showMessage("Reading Sensor...","Sample " + String(i + 1) + "/" + String(SENSOR_SAMPLE_COUNT));
         delay(150);
     }
 
@@ -362,56 +370,83 @@ uint16_t retrieveSensorData(){
 }
 
 // LED strip handler
+
+// Maps a captured color-temperature sensor value to a white-channel PWM duty
+// cycle. Yellow is always the complement (255 - white), so this ratio defines
+// the white:yellow *mix* only -- it says nothing about overall brightness.
 uint32_t calculatePWM(uint16_t sensorValue){
     return map(sensorValue, 2700, 6500, 0, 255);
 }
 
-void applyPWM(uint32_t pwm){
-    uint32_t pwmI = 255 - pwm;
-    ledcWrite(LEDW, pwm);
-    ledcWrite(LEDY, pwmI);
+// Call this whenever a new color-temperature value becomes the "current"
+// target (on boot, after a long-press capture, or after loading from EEPROM
+// for thermal dimming). It fixes the white/yellow mix that all subsequent
+// applyScaledPWM() calls will scale up or down.
+void setBasePWM(uint16_t sensorValue){
+  uint32_t whitePWM = calculatePWM(sensorValue);
+  baseWhitePWM = whitePWM;
+  baseYellowPWM = 255 - whitePWM;
+}
 
-    if(pwm > pwmI){
-      floorVal = pwmI;
-      ceilingVal = pwm;
+// Applies the current base white/yellow mix scaled by `scale` (e.g. 0.8 for
+// -20%, 1.2 for +20%). This preserves the white:yellow ratio (color
+// temperature) while changing overall output brightness -- unlike writing
+// calculatePWM() directly, which would also shift the color mix.
+void applyScaledPWM(float scale){
+    int whiteOut  = (int)(baseWhitePWM  * scale);
+    int yellowOut = (int)(baseYellowPWM * scale);
+
+    whiteOut  = constrain(whiteOut, 0, 255);
+    yellowOut = constrain(yellowOut, 0, 255);
+
+    ledcWrite(LEDW, whiteOut);
+    ledcWrite(LEDY, yellowOut);
+
+    if (whiteOut > yellowOut) {
+      floorVal = yellowOut;
+      ceilingVal = whiteOut;
+    } else if (whiteOut == yellowOut) {
+      floorVal = whiteOut;
+      ceilingVal = whiteOut;
+    } else {
+      floorVal = whiteOut;
+      ceilingVal = yellowOut;
     }
-    else if( pwm == pwmI){
-      floorVal = pwm;
-      ceilingVal = pwm;
-    }
-    else{
-      floorVal = pwm;
-      ceilingVal = pwmI;
-    }
-    showMessage("Output PWM", "Value: " + String(pwm));
+
+    // showMessage("Output PWM", "W:" + String(whiteOut) + " Y:" + String(yellowOut));
 }
 
 // Initialize display
-void initDisplay(){
-  Wire.begin();
-  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-}
+// void initDisplay(){
+//   Wire.begin();
+//   display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+//   display.setTextSize(1);
+//   display.setTextColor(SSD1306_WHITE);
+// }
 
-void showMessage(String line1, String line2 = ""){
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println(line1);
-  display.println(line2);
-  display.display();
-}
+// void showMessage(String line1, String line2 = ""){
+//   display.clearDisplay();
+//   display.setCursor(0, 0);
+//   display.println(line1);
+//   display.println(line2);
+//   display.display();
+// }
 
 void bootSequence(){
   storedSensorValue = loadTempFromEEPROM();
   storedLuxValue = loadLuxFromEEPROM();
-  showMessage("Booting...", "Stored color temperature: " + String(storedSensorValue));
-  Serial.println("Booting...");
+  baselineLux = storedLuxValue;
+  brightnessState = 0;
 
+  // showMessage("Booting...", "Stored color temperature: " + String(storedSensorValue));
+
+  Serial.println("Booting...");
   Serial.print("Stored color temperature: ");
   Serial.println(String(storedSensorValue));
   Serial.print("Stored lux value: ");
   Serial.println(String(storedLuxValue));
   delay(1500);
-  applyPWM(calculatePWM(storedSensorValue));
+
+  setBasePWM(storedSensorValue);
+  applyScaledPWM(1.0f);
 }
